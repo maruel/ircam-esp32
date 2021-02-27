@@ -15,14 +15,37 @@
 static_assert(sizeof(WIFI_SSID) > 2, "Don't forget to source secrets.sh");
 
 
+// Standard ESP32 SPI pins:
+//      HSPI VSPI
+// CS0*   15    5
+// SCLK   14   18
+// MISO   12   19
+// MOSI   13   23
+// https://github.com/espressif/arduino-esp32/blob/master/libraries/SPI/src/SPI.cpp
+
+// LilyGO TTGO-Display pin out
+//
+// GND        3V3
+// GND         36
+// 21 SDA      37
+// 22 SCL      38
+// 17          39
+//  2          32
+// 15          33 CS
+// 13          25 SCLK
+// 12          26
+// GND         27 MISO
+// GND        GND
+// 3V3         5V
+
+
 // Globals.
 
-// TTGO-Display pin out are defined in platform.ini.
 
-// ADC_EN is the ADC detection enable port.
-// If the USB port is used for power supply, it is turned on by default.
-// If it is powered by battery, it needs to be set to HIGH. After voltage
-// measurement, it needs to be set to LOW to save power.
+// ADC_EN is the ADC detection enable port:
+// - If the USB port is used for power supply, it is turned on by default.
+// - If it is powered by battery, it needs to be set to HIGH. After voltage
+//   measurement, it needs to be set to LOW to save power.
 const int ADC_EN = 14;
 // ADC_PIN is the pin to read to do voltage measurement.
 const int ADC_PIN = 34;
@@ -32,13 +55,22 @@ const int BUTTON_RIGHT = 35;
 
 
 // API documentation is code:
-// https://github.com/Bodmer/TFT_eSPI/blob/master/TFT_eSPI.h
+//   https://github.com/Bodmer/TFT_eSPI/blob/master/TFT_eSPI.h
+//
 // TTGO-Display:
 // - 135x240; default view is in portrait, which is what we want.
 // - Top left is 0, 0.
 // - Bottom right is 134, 239.
 // - RGB 65k colors
-// - TFT_BL means the backlight pin.
+//
+// Pins (VSPI) as defined in platform.ini:
+// - SCLK    19
+// - CS       5
+// - MOSI    19
+// - MISO    23 (unused)
+// - TFT_BL   4 (backlight, HIGH = on) Only for v1.1, v1.0 used 14.
+// - TFT_DC  16 (???)
+// - TFT_RST 23 (unnecessary)
 TFT_eSPI tft;
 
 
@@ -48,12 +80,12 @@ Button2 button_right(BUTTON_RIGHT);
 
 
 // Lepton IR camera over SPI.
-const int IR_SPI_CS = 33;   // 5
-const int IR_SPI_SCLK = 25; // 18
-const int IR_SPI_MISO = 27; //
-const int IR_SPI_MOSI = 26; // 19 (unused)
-//const int I2C_SCL = 22;
-//const int I2C_SDA = 21;
+const int IR_SPI_CS = 33;
+const int IR_SPI_SCLK = 25;
+const int IR_SPI_MISO = 27;
+const int IR_SPI_MOSI = 26; // unused, but we have to sacrifice one
+const int I2C_SDA = 21;
+const int I2C_SCL = 22;
 // Investigate use low level API:
 // https://github.com/espressif/arduino-esp32/issues/4590
 // https://github.com/espressif/arduino-esp32/blob/master/tools/sdk/include/driver/driver/spi_master.h
@@ -88,6 +120,7 @@ int lastOTAPercent = 0;
 
 // For next 1 second timeout.
 uint32_t nextSecondMillis = 0;
+uint32_t nextDeciSecondMillis = 0;
 
 enum BOTTOM_DISPLAY {
   BOTTOM_NOTHING = 0,
@@ -343,9 +376,14 @@ void setup() {
   // we'll display (3x the actual framerate).
   //lepton_spi.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
   //lepton_cci.begin();
-  Wire.begin();
-  Wire.setClock(400000);  // TODO(maruel): Test 1mhz
-  SPI.begin();
+  //
+  // TODO(maruel): Test 1MHz, will need to adjust pull up resistor.
+  Wire.begin(I2C_SDA, I2C_SCL, 400000);
+  // No need to set the speed, every transaction sets the speed to around 20MHz.
+  // Documentation is code:
+  //   https://github.com/espressif/arduino-esp32/blob/master/libraries/SPI/src/SPI.h
+  SPI.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
+  SPI.setHwCs(true);
   flir.init(LeptonFLiR_ImageStorageMode_80x60_16bpp);
   //LeptonFLiR_ImageStorageMode_40x30_8bpp);
   flir.sys_setTelemetryEnabled(ENABLED);
@@ -364,7 +402,8 @@ void setup() {
   displayBottom("Welcome!", TFT_WHITE);
   displayBottom2("FLIR", TFT_WHITE);
 
-  nextSecondMillis = millis() + 1000;
+  nextDeciSecondMillis = millis() + 100;
+  nextSecondMillis = nextDeciSecondMillis + 900;
 
   // OTA
   ArduinoOTA
@@ -462,38 +501,41 @@ void loop() {
         showIP();
         break;
     }
-  }
-
-  if (flir.readNextFrame()) {
-    uint32_t frameNumber = flir.getTelemetryFrameCounter();
-    if (frameNumber != flirLastFrameNumber) {
-      flirLastFrameNumber = frameNumber;
-      // Find the hottest spot on the frame.
-      int hotVal = 0;
-      int hotX = 0;
-      int hotY = 0;
-      for (int y = 0; y < flir.getImageHeight(); ++y) {
-        for (int x = 0; x < flir.getImageWidth(); ++x) {
-          int val = flir.getImageDataRowCol(y, x);
-          if (val > hotVal) {
-            hotVal = val;
-            hotX = x; hotY = y;
+    if (flir.readNextFrame()) {
+      uint32_t frameNumber = flir.getTelemetryFrameCounter();
+      if (frameNumber != flirLastFrameNumber) {
+        flirLastFrameNumber = frameNumber;
+        // Find the hottest spot on the frame.
+        int hotVal = 0;
+        int hotX = 0;
+        int hotY = 0;
+        for (int y = 0; y < flir.getImageHeight(); ++y) {
+          for (int x = 0; x < flir.getImageWidth(); ++x) {
+            int val = flir.getImageDataRowCol(y, x);
+            if (val > hotVal) {
+              hotVal = val;
+              hotX = x; hotY = y;
+            }
           }
         }
-      }
-      String msg(hotVal);
-      msg += " (";
-      msg += hotX;
-      msg += ",";
-      msg += hotY;
-      displayBottom2(msg, TFT_WHITE);
+        String msg(hotVal);
+        msg += " (";
+        msg += hotX;
+        msg += ",";
+        msg += hotY;
+        displayBottom2(msg, TFT_WHITE);
 
-      // TODO(maruel): Display frame.
+        // TODO(maruel): Display frame.
 
-      if (flir.getShouldRunFFCNormalization()) {
-        flir.sys_runFFCNormalization();
+        if (flir.getShouldRunFFCNormalization()) {
+          flir.sys_runFFCNormalization();
+        }
       }
     }
+  }
+
+  if (nextDeciSecondMillis <= m) {
+    nextDeciSecondMillis = m + 100;
   }
 
   ArduinoOTA.handle();
