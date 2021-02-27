@@ -100,6 +100,19 @@ uint32_t flirLastFrameNumber = -1;
 // Voltage reference for USB or LiPo voltage measurement.
 int vref = 1100;
 
+
+int lastOTAPercent = 0;
+
+// For next 1 second timeout.
+//uint32_t nextSecondMillis = 0;
+//uint32_t nextDeciSecondMillis = 0;
+//TaskHandle_t loopDisplayHandle = NULL;
+TimerHandle_t timerDisplay = NULL;
+TimerHandle_t timerLepton = NULL;
+
+
+// Display
+
 // Code for the clock, to be removed.
 // Saved H, M, S x & y coords.
 uint16_t osx=64, osy=64, omx=64, omy=64, ohx=64, ohy=64;
@@ -115,12 +128,6 @@ static uint8_t conv2d(const char* p) {
 uint8_t hh = conv2d(__TIME__), mm=conv2d(__TIME__+3), ss=conv2d(__TIME__+6);
 
 boolean initialClockUpdate = 1;
-
-int lastOTAPercent = 0;
-
-// For next 1 second timeout.
-uint32_t nextSecondMillis = 0;
-uint32_t nextDeciSecondMillis = 0;
 
 enum BOTTOM_DISPLAY {
   BOTTOM_NOTHING = 0,
@@ -276,11 +283,10 @@ void initVoltage() {
 }
 
 void showVoltage() {
-  // TODO(maruel): Optimize this horrible calculation.
-  float v = (float)analogRead(ADC_PIN);
-  float battery_voltage = (v / 4095.0) * 2.0 * 3.3 * (vref / 1000.0);
+  //float battery_voltage = (analogRead(ADC_PIN) / 4095.0) * 2.0 * 3.3 * (vref / 1000.0);
+  int battery_voltage = (analogRead(ADC_PIN) * 66 * vref + 40950/2) / 40950;
   String msg(battery_voltage);
-  msg += "V";
+  msg += "mV";
   displayBottom(msg, TFT_GREEN);
 }
 
@@ -341,8 +347,117 @@ void shallowSleep(int ms) {
 	esp_light_sleep_start();
 }
 
+void loopDisplay(void*);
 
 
+// The main loop controls the lepton.
+// It's called from
+// https://github.com/espressif/arduino-esp32/blob/master/cores/esp32/main.cpp
+void loop() {
+  /*
+  // Once a second operations.
+  // TODO(maruel): 49 days.
+  uint32_t m = millis();
+  if (nextSecondMillis <= m) {
+    nextSecondMillis = m+1000;
+  }
+
+  if (nextDeciSecondMillis <= m) {
+    nextDeciSecondMillis = m + 100;
+  }
+  */
+
+  ArduinoOTA.handle();
+
+  button_left.loop();
+  button_right.loop();
+
+  // Force a task scheduling and throttle ourselves to 50Hz~100Hz max.
+  vTaskDelay(10 / portTICK_PERIOD_MS);
+}
+
+// handleDisplay runs at 1Hz.
+void handleDisplay(void*) {
+  //vTaskDelay(1000 / portTICK_PERIOD_MS);
+  // Advance second.
+  //uint32_t m = millis();
+  //if (nextSecondMillis <= m) {
+  ss++;
+  if (ss==60) {
+    ss=0;
+    // Advance minute.
+    mm++;
+    if (mm>59) {
+      mm=0;
+      // Advance hour.
+      hh++;
+      if (hh>23) {
+        hh=0;
+      }
+    }
+  }
+  updateClock();
+  switch (bottomDisplay) {
+    case BOTTOM_NOTHING:
+      displayBottom("PressLeft", TFT_GREEN);
+      break;
+    case BOTTOM_DISPLAY_END:
+      displayBottom("", TFT_GREEN);
+      break;
+    case BOTTOM_VOLTAGE:
+      showVoltage();
+      break;
+    case BOTTOM_RSSI:
+      showRSSI();
+      break;
+    case BOTTOM_IP:
+      showIP();
+      break;
+  }
+}
+
+// handleLepton runs at 10Hz.
+void handleLepton(void*) {
+  if (flir.readNextFrame()) {
+    uint32_t frameNumber = flir.getTelemetryFrameCounter();
+    if (frameNumber != flirLastFrameNumber) {
+      flirLastFrameNumber = frameNumber;
+      /*
+      // Find the hottest spot on the frame.
+      int hotVal = 0;
+      int hotX = 0;
+      int hotY = 0;
+      for (int y = 0; y < flir.getImageHeight(); ++y) {
+        for (int x = 0; x < flir.getImageWidth(); ++x) {
+          int val = flir.getImageDataRowCol(y, x);
+          if (val > hotVal) {
+            hotVal = val;
+            hotX = x; hotY = y;
+          }
+        }
+      }
+      */
+
+      /*
+      // TODO(maruel): This should be done by the display task.
+      String msg(hotVal);
+      msg += " (";
+      msg += hotX;
+      msg += ",";
+      msg += hotY;
+      displayBottom2(msg, TFT_WHITE);
+
+      // TODO(maruel): Display frame.
+      */
+
+      if (flir.getShouldRunFFCNormalization()) {
+        flir.sys_runFFCNormalization();
+      }
+    }
+  }
+}
+
+// Initialization.
 void setup() {
   Serial.begin(921600);
   Serial.println("Booting");
@@ -366,7 +481,6 @@ void setup() {
       break;
     }
   });
-  //WiFi.mode(WIFI_STA);
   // hex decode so we can pass weird characters through environment variables.
   char pass[] = WIFI_PASS;
   fromhex(pass);
@@ -402,12 +516,15 @@ void setup() {
   displayBottom("Welcome!", TFT_WHITE);
   displayBottom2("FLIR", TFT_WHITE);
 
-  nextDeciSecondMillis = millis() + 100;
-  nextSecondMillis = nextDeciSecondMillis + 900;
+  //nextDeciSecondMillis = millis() + 100;
+  //nextSecondMillis = nextDeciSecondMillis + 900;
 
   // OTA
   ArduinoOTA
     .onStart([]() {
+      xTimerStop(timerDisplay, 100/portTICK_PERIOD_MS);
+      xTimerStop(timerLepton, 100/portTICK_PERIOD_MS);
+      // The display will continue updating asynchronously.
       bottomDisplay = BOTTOM_NOTHING;
       String type;
       if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -459,87 +576,23 @@ void setup() {
       displayBottom(msg, TFT_YELLOW);
     });
   ArduinoOTA.begin();
-}
 
+  // loop() will be called in a loop on the application core. Create a second
+  // task to loop on the protocol core to maximize utilization.
+  // https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/freertos-smp.html
+  // PRO_CPU = 0 (Protocols CPU, Bluetooth and Wifi)
+  // APP_CPU = 1 (Application CPU)
+  //int core2 = xPortGetCoreID() ^ 1;
+  // Run the display on the protocol core since the display is less demanding
+  // that the lepton, which reads the HSPI bus continuously.
+  //xTaskCreatePinnedToCore(loopDisplay, "loop2", CONFIG_ARDUINO_LOOP_STACK_SIZE, NULL, 10, &loop2Handle, PRO_CPU);
 
-void loop() {
-  // Once a second operations.
-  // TODO(maruel): 49 days.
-  uint32_t m = millis();
-  if (nextSecondMillis <= m) {
-    nextSecondMillis = m+1000;
-    // Advance second.
-    ss++;
-    if (ss==60) {
-      ss=0;
-      // Advance minute.
-      mm++;
-      if (mm>59) {
-        mm=0;
-        // Advance hour.
-        hh++;
-        if (hh>23) {
-          hh=0;
-        }
-      }
-    }
-    updateClock();
-    switch (bottomDisplay) {
-      case BOTTOM_NOTHING:
-        displayBottom("PressLeft", TFT_GREEN);
-        break;
-      case BOTTOM_DISPLAY_END:
-        displayBottom("", TFT_GREEN);
-        break;
-      case BOTTOM_VOLTAGE:
-        showVoltage();
-        break;
-      case BOTTOM_RSSI:
-        showRSSI();
-        break;
-      case BOTTOM_IP:
-        showIP();
-        break;
-    }
-    if (flir.readNextFrame()) {
-      uint32_t frameNumber = flir.getTelemetryFrameCounter();
-      if (frameNumber != flirLastFrameNumber) {
-        flirLastFrameNumber = frameNumber;
-        // Find the hottest spot on the frame.
-        int hotVal = 0;
-        int hotX = 0;
-        int hotY = 0;
-        for (int y = 0; y < flir.getImageHeight(); ++y) {
-          for (int x = 0; x < flir.getImageWidth(); ++x) {
-            int val = flir.getImageDataRowCol(y, x);
-            if (val > hotVal) {
-              hotVal = val;
-              hotX = x; hotY = y;
-            }
-          }
-        }
-        String msg(hotVal);
-        msg += " (";
-        msg += hotX;
-        msg += ",";
-        msg += hotY;
-        displayBottom2(msg, TFT_WHITE);
-
-        // TODO(maruel): Display frame.
-
-        if (flir.getShouldRunFFCNormalization()) {
-          flir.sys_runFFCNormalization();
-        }
-      }
-    }
-  }
-
-  if (nextDeciSecondMillis <= m) {
-    nextDeciSecondMillis = m + 100;
-  }
-
-  ArduinoOTA.handle();
-
-  button_left.loop();
-  button_right.loop();
+  // TODO(maruel): Investigate using timers. The doc is unclear if using float
+  // is fine in these, as for task it notes that tasks will be pinned to a CPU.
+  timerDisplay = xTimerCreate("display", 1000/portTICK_PERIOD_MS, pdTRUE, NULL, handleDisplay);
+  timerLepton = xTimerCreate("lepton", 100/portTICK_PERIOD_MS, pdTRUE, NULL, handleLepton);
+  xTimerStart(timerDisplay, 100/portTICK_PERIOD_MS);
+  xTimerStart(timerLepton, 100/portTICK_PERIOD_MS);
+  //xTimerStop(timerLepton, 1000);
+  //xTimerStop(timerDisplay, 1000);
 }
