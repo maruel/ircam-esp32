@@ -6,9 +6,14 @@
 #include <Button2.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
-#include <Wire.h>
 #include <WiFi.h>
 #include <esp_adc_cal.h>
+#include <LeptonFLiR.h>
+
+
+// Assert that WIFI_SSID was provided.
+static_assert(sizeof(WIFI_SSID) > 2, "Don't forget to source secrets.sh");
+
 
 // Globals.
 
@@ -43,16 +48,21 @@ Button2 button_right(BUTTON_RIGHT);
 
 
 // Lepton IR camera over SPI.
-const int IR_SPI_CS = 33;
-const int IR_SPI_SCLK = 25;
-const int IR_SPI_MISO = 27;
-const int IR_SPI_MOSI = 26;
+const int IR_SPI_CS = 33;   // 5
+const int IR_SPI_SCLK = 25; // 18
+const int IR_SPI_MISO = 27; //
+const int IR_SPI_MOSI = 26; // 19 (unused)
 //const int I2C_SCL = 22;
 //const int I2C_SDA = 21;
 // Investigate use low level API:
 // https://github.com/espressif/arduino-esp32/issues/4590
 // https://github.com/espressif/arduino-esp32/blob/master/tools/sdk/include/driver/driver/spi_master.h
-SPIClass lepton_spi(HSPI);
+//SPIClass lepton_spi(HSPI);
+//CCI lepton_cci;
+LeptonFLiR flir;
+
+// To skip redundant frames.
+uint32_t flirLastFrameNumber = -1;
 
 
 // Voltage reference for USB or LiPo voltage measurement.
@@ -78,8 +88,14 @@ int lastOTAPercent = 0;
 
 // For next 1 second timeout.
 uint32_t nextSecondMillis = 0;
-bool displayVoltage = false;
-bool displayRSSI = false;
+
+enum BOTTOM_DISPLAY {
+  BOTTOM_NOTHING = 0,
+  BOTTOM_VOLTAGE = 1,
+  BOTTOM_RSSI = 2,
+  BOTTOM_IP = 3,
+  BOTTOM_DISPLAY_END = 4,
+} bottomDisplay = BOTTOM_NOTHING;
 
 
 void displayBottom(const char *msg, int color) {
@@ -92,6 +108,18 @@ void displayBottom(const char *msg, int color) {
 void displayBottom(const String& msg, int color) {
   displayBottom(msg.c_str(), color);
 }
+
+void displayBottom2(const char *msg, int color) {
+  const int32_t Y_BOTTOM = (TFT_HEIGHT-40);
+  tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, TFT_HEIGHT-Y_BOTTOM, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(msg, 0, Y_BOTTOM, 4);
+}
+
+void displayBottom2(const String& msg, int color) {
+  displayBottom2(msg.c_str(), color);
+}
+
 
 // Clock code.
 
@@ -230,6 +258,10 @@ void showRSSI() {
   displayBottom(msg, TFT_GREEN);
 }
 
+void showIP() {
+  displayBottom(WiFi.localIP().toString(), TFT_GREEN);
+}
+
 // Housekeeping code.
 
 // fromchar converts a hex char into its base 16 value.
@@ -276,6 +308,8 @@ void shallowSleep(int ms) {
 	esp_light_sleep_start();
 }
 
+
+
 void setup() {
   Serial.begin(921600);
   Serial.println("Booting");
@@ -307,23 +341,20 @@ void setup() {
 
   // TODO(maruel): Use DMA for the Lepton, since it sends more data than what
   // we'll display (3x the actual framerate).
-  lepton_spi.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
+  //lepton_spi.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
+  //lepton_cci.begin();
   Wire.begin();
+  Wire.setClock(400000);  // TODO(maruel): Test 1mhz
+  SPI.begin();
+  flir.init(LeptonFLiR_ImageStorageMode_80x60_16bpp);
+  //LeptonFLiR_ImageStorageMode_40x30_8bpp);
+  flir.sys_setTelemetryEnabled(ENABLED);
 
   button_left.setPressedHandler([](Button2 & b) {
-    displayRSSI = false;
-    displayVoltage = !displayVoltage;
-    if (!displayVoltage) {
-      displayBottom("Zzzz", TFT_MAGENTA);
-    }
+    bottomDisplay = (BOTTOM_DISPLAY)((bottomDisplay+1)%BOTTOM_DISPLAY_END);
   });
 
   button_right.setPressedHandler([](Button2 & b) {
-    displayVoltage = false;
-    displayRSSI = !displayRSSI;
-    if (!displayRSSI) {
-      displayBottom("Zzzz", TFT_MAGENTA);
-    }
   });
   initVoltage();
 
@@ -331,14 +362,14 @@ void setup() {
   tft.init();
   drawClock();
   displayBottom("Welcome!", TFT_WHITE);
+  displayBottom2("FLIR", TFT_WHITE);
 
   nextSecondMillis = millis() + 1000;
 
   // OTA
   ArduinoOTA
     .onStart([]() {
-      displayVoltage = false;
-      displayRSSI = false;
+      bottomDisplay = BOTTOM_NOTHING;
       String type;
       if (ArduinoOTA.getCommand() == U_FLASH) {
         type = "sketch";
@@ -391,6 +422,7 @@ void setup() {
   ArduinoOTA.begin();
 }
 
+
 void loop() {
   // Once a second operations.
   // TODO(maruel): 49 days.
@@ -413,10 +445,54 @@ void loop() {
       }
     }
     updateClock();
-    if (displayVoltage) {
-      showVoltage();
-    } else if (displayRSSI) {
-      showRSSI();
+    switch (bottomDisplay) {
+      case BOTTOM_NOTHING:
+        displayBottom("PressLeft", TFT_GREEN);
+        break;
+      case BOTTOM_DISPLAY_END:
+        displayBottom("", TFT_GREEN);
+        break;
+      case BOTTOM_VOLTAGE:
+        showVoltage();
+        break;
+      case BOTTOM_RSSI:
+        showRSSI();
+        break;
+      case BOTTOM_IP:
+        showIP();
+        break;
+    }
+  }
+
+  if (flir.readNextFrame()) {
+    uint32_t frameNumber = flir.getTelemetryFrameCounter();
+    if (frameNumber != flirLastFrameNumber) {
+      flirLastFrameNumber = frameNumber;
+      // Find the hottest spot on the frame.
+      int hotVal = 0;
+      int hotX = 0;
+      int hotY = 0;
+      for (int y = 0; y < flir.getImageHeight(); ++y) {
+        for (int x = 0; x < flir.getImageWidth(); ++x) {
+          int val = flir.getImageDataRowCol(y, x);
+          if (val > hotVal) {
+            hotVal = val;
+            hotX = x; hotY = y;
+          }
+        }
+      }
+      String msg(hotVal);
+      msg += " (";
+      msg += hotX;
+      msg += ",";
+      msg += hotY;
+      displayBottom2(msg, TFT_WHITE);
+
+      // TODO(maruel): Display frame.
+
+      if (flir.getShouldRunFFCNormalization()) {
+        flir.sys_runFFCNormalization();
+      }
     }
   }
 
