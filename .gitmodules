@@ -1,0 +1,3 @@
+[submodule "lib/Lepton-FLiR-Arduino"]
+	path = lib/Lepton-FLiR-Arduino
+	url = git@github.com:maruel/Lepton-FLiR-Arduino

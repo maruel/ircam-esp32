@@ -104,11 +104,13 @@ int vref = 1100;
 int lastOTAPercent = 0;
 
 // For next 1 second timeout.
-//uint32_t nextSecondMillis = 0;
-//uint32_t nextDeciSecondMillis = 0;
+uint32_t nextSecondMillis = 0;
+uint32_t nextDeciSecondMillis = 0;
 //TaskHandle_t loopDisplayHandle = NULL;
+#ifdef MARUEL_TIMERS
 TimerHandle_t timerDisplay = NULL;
 TimerHandle_t timerLepton = NULL;
+#endif
 
 
 // Display
@@ -139,10 +141,11 @@ enum BOTTOM_DISPLAY {
 
 
 void displayBottom(const char *msg, int color) {
-  const int32_t Y_BOTTOM = (TFT_HEIGHT-20);
-  tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, TFT_HEIGHT-Y_BOTTOM, TFT_BLACK);
+  const int height = 18;
+  const int32_t Y_BOTTOM = (TFT_HEIGHT-height);
+  tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, height, TFT_BLACK);
   tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(msg, 0, Y_BOTTOM, 4);
+  tft.drawString(msg, 0, Y_BOTTOM, 2);
 }
 
 void displayBottom(const String& msg, int color) {
@@ -150,10 +153,11 @@ void displayBottom(const String& msg, int color) {
 }
 
 void displayBottom2(const char *msg, int color) {
-  const int32_t Y_BOTTOM = (TFT_HEIGHT-40);
-  tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, TFT_HEIGHT-Y_BOTTOM, TFT_BLACK);
+  const int height = 18;
+  const int32_t Y_BOTTOM = (TFT_HEIGHT-(2*height));
+  tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, height, TFT_BLACK);
   tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(msg, 0, Y_BOTTOM, 4);
+  tft.drawString(msg, 0, Y_BOTTOM, 2);
 }
 
 void displayBottom2(const String& msg, int color) {
@@ -269,14 +273,8 @@ void initVoltage() {
   // Check type of calibration value used to characterize ADC.
   esp_adc_cal_characteristics_t adc_chars;
   esp_adc_cal_value_t val_type = esp_adc_cal_characterize(ADC_UNIT_1, (adc_atten_t)ADC1_CHANNEL_6, ADC_WIDTH_BIT_12, 1100, &adc_chars);
-  // Check type of calibration value used to characterize ADC.
   if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
-    //Serial.printf("eFuse Vref:%u mV", adc_chars.vref);
     vref = adc_chars.vref;
-  } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
-   //Serial.printf("Two Point --> coeff_a:%umV coeff_b:%umV\n", adc_chars.coeff_a, adc_chars.coeff_b);
-  } else {
-    //Serial.println("Default Vref: 1100mV");
   }
   pinMode(ADC_PIN, INPUT);
   pinMode(ADC_EN, OUTPUT);
@@ -347,41 +345,11 @@ void shallowSleep(int ms) {
 	esp_light_sleep_start();
 }
 
-void loopDisplay(void*);
-
-
-// The main loop controls the lepton.
-// It's called from
-// https://github.com/espressif/arduino-esp32/blob/master/cores/esp32/main.cpp
-void loop() {
-  /*
-  // Once a second operations.
-  // TODO(maruel): 49 days.
-  uint32_t m = millis();
-  if (nextSecondMillis <= m) {
-    nextSecondMillis = m+1000;
-  }
-
-  if (nextDeciSecondMillis <= m) {
-    nextDeciSecondMillis = m + 100;
-  }
-  */
-
-  ArduinoOTA.handle();
-
-  button_left.loop();
-  button_right.loop();
-
-  // Force a task scheduling and throttle ourselves to 50Hz~100Hz max.
-  vTaskDelay(10 / portTICK_PERIOD_MS);
-}
 
 // handleDisplay runs at 1Hz.
 void handleDisplay(void*) {
-  //vTaskDelay(1000 / portTICK_PERIOD_MS);
+  Serial.printf("%u handleDisplay()\n", (uint32_t)millis());
   // Advance second.
-  //uint32_t m = millis();
-  //if (nextSecondMillis <= m) {
   ss++;
   if (ss==60) {
     ss=0;
@@ -414,15 +382,17 @@ void handleDisplay(void*) {
       showIP();
       break;
   }
+  Serial.printf("%u handleDisplay() end\n", (uint32_t)millis());
 }
 
 // handleLepton runs at 10Hz.
 void handleLepton(void*) {
+  Serial.printf("%u handleLepton()\n", (uint32_t)millis());
+  //*
   if (flir.readNextFrame()) {
     uint32_t frameNumber = flir.getTelemetryFrameCounter();
     if (frameNumber != flirLastFrameNumber) {
       flirLastFrameNumber = frameNumber;
-      /*
       // Find the hottest spot on the frame.
       int hotVal = 0;
       int hotX = 0;
@@ -436,9 +406,7 @@ void handleLepton(void*) {
           }
         }
       }
-      */
 
-      /*
       // TODO(maruel): This should be done by the display task.
       String msg(hotVal);
       msg += " (";
@@ -448,19 +416,22 @@ void handleLepton(void*) {
       displayBottom2(msg, TFT_WHITE);
 
       // TODO(maruel): Display frame.
-      */
-
-      if (flir.getShouldRunFFCNormalization()) {
-        flir.sys_runFFCNormalization();
-      }
+      //if (flir.getShouldRunFFCNormalization()) {
+      //  flir.sys_runFFCNormalization();
+      //}
     }
   }
+  //*/
+  //String msg(flir.sys_getCameraUptime());
+  String msg(flir.sys_getAuxTemperature());
+  msg += "`C";
+  displayBottom2(msg, TFT_WHITE);
+  Serial.printf("%u handleLepton() end\n", (uint32_t)millis());
 }
 
 // Initialization.
 void setup() {
   Serial.begin(921600);
-  Serial.println("Booting");
 
   // TODO(maruel): Neither hostname nor events work.
   WiFi.setHostname("ircam-esp32");
@@ -516,14 +487,16 @@ void setup() {
   displayBottom("Welcome!", TFT_WHITE);
   displayBottom2("FLIR", TFT_WHITE);
 
-  //nextDeciSecondMillis = millis() + 100;
-  //nextSecondMillis = nextDeciSecondMillis + 900;
+  nextDeciSecondMillis = millis() + 100;
+  nextSecondMillis = nextDeciSecondMillis + 900;
 
   // OTA
   ArduinoOTA
     .onStart([]() {
+#ifdef MARUEL_TIMERS
       xTimerStop(timerDisplay, 100/portTICK_PERIOD_MS);
       xTimerStop(timerLepton, 100/portTICK_PERIOD_MS);
+#endif
       // The display will continue updating asynchronously.
       bottomDisplay = BOTTOM_NOTHING;
       String type;
@@ -587,12 +560,39 @@ void setup() {
   // that the lepton, which reads the HSPI bus continuously.
   //xTaskCreatePinnedToCore(loopDisplay, "loop2", CONFIG_ARDUINO_LOOP_STACK_SIZE, NULL, 10, &loop2Handle, PRO_CPU);
 
+#ifdef MARUEL_TIMERS
   // TODO(maruel): Investigate using timers. The doc is unclear if using float
   // is fine in these, as for task it notes that tasks will be pinned to a CPU.
   timerDisplay = xTimerCreate("display", 1000/portTICK_PERIOD_MS, pdTRUE, NULL, handleDisplay);
   timerLepton = xTimerCreate("lepton", 100/portTICK_PERIOD_MS, pdTRUE, NULL, handleLepton);
   xTimerStart(timerDisplay, 100/portTICK_PERIOD_MS);
   xTimerStart(timerLepton, 100/portTICK_PERIOD_MS);
-  //xTimerStop(timerLepton, 1000);
-  //xTimerStop(timerDisplay, 1000);
+#endif
+}
+
+
+// It's called from
+// https://github.com/espressif/arduino-esp32/blob/master/cores/esp32/main.cpp
+void loop() {
+  // Once a second operations.
+  // TODO(maruel): 49 days.
+  uint32_t m = millis();
+  if (nextSecondMillis <= m) {
+    nextSecondMillis = m+1000;
+    handleDisplay(NULL);
+  }
+
+  if (nextDeciSecondMillis <= m) {
+    nextDeciSecondMillis = m + 100;
+    handleLepton(NULL);
+  }
+
+  ArduinoOTA.handle();
+
+  button_left.loop();
+  button_right.loop();
+
+  // Force a task scheduling and throttle ourselves to 50Hz~100Hz max.
+  //vTaskDelay(10 / portTICK_PERIOD_MS);
+  delay(1);
 }
