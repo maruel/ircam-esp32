@@ -71,7 +71,9 @@ const int BUTTON_RIGHT = 35;
 // - TFT_BL   4 (backlight, HIGH = on) Only for v1.1, v1.0 used 14.
 // - TFT_DC  16 (???)
 // - TFT_RST 23 (unnecessary)
+#ifdef USE_DISPLAY
 TFT_eSPI tft;
+#endif
 
 
 // https://github.com/LennartHennigs/Button2
@@ -86,12 +88,7 @@ const int IR_SPI_MISO = 27;
 const int IR_SPI_MOSI = 26; // unused, but we have to sacrifice one
 const int I2C_SDA = 21;
 const int I2C_SCL = 22;
-// Investigate use low level API:
-// https://github.com/espressif/arduino-esp32/issues/4590
-// https://github.com/espressif/arduino-esp32/blob/master/tools/sdk/include/driver/driver/spi_master.h
-//SPIClass lepton_spi(HSPI);
-//CCI lepton_cci;
-LeptonFLiR flir;
+LeptonFLiR flir(Wire, IR_SPI_CS);
 
 // To skip redundant frames.
 uint32_t flirLastFrameNumber = -1;
@@ -141,11 +138,13 @@ enum BOTTOM_DISPLAY {
 
 
 void displayBottom(const char *msg, int color) {
+#ifdef USE_DISPLAY
   const int height = 18;
   const int32_t Y_BOTTOM = (TFT_HEIGHT-height);
   tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, height, TFT_BLACK);
   tft.setTextColor(color, TFT_BLACK);
   tft.drawString(msg, 0, Y_BOTTOM, 2);
+#endif
 }
 
 void displayBottom(const String& msg, int color) {
@@ -153,11 +152,15 @@ void displayBottom(const String& msg, int color) {
 }
 
 void displayBottom2(const char *msg, int color) {
+#ifdef USE_DISPLAY
   const int height = 18;
   const int32_t Y_BOTTOM = (TFT_HEIGHT-(2*height));
   tft.fillRect(0, Y_BOTTOM, TFT_WIDTH, height, TFT_BLACK);
   tft.setTextColor(color, TFT_BLACK);
   tft.drawString(msg, 0, Y_BOTTOM, 2);
+#endif
+  Serial.print("bottom:");
+  Serial.println(msg);
 }
 
 void displayBottom2(const String& msg, int color) {
@@ -169,6 +172,7 @@ void displayBottom2(const String& msg, int color) {
 
 // drawClock draws the background clock.
 void drawClock() {
+#ifdef USE_DISPLAY
   int TFT_GREY = 0xBDF7;
   tft.fillScreen(TFT_GREY);
   tft.setTextColor(TFT_GREEN, TFT_GREY);
@@ -224,9 +228,11 @@ void drawClock() {
   tft.fillRect(0, 235, 5, 5, TFT_GREEN);
   tft.fillRect(130, 0, 5, 5, TFT_ORANGE);
   tft.fillRect(130, 235, 5, 5, TFT_MAGENTA);
+#endif
 }
 
 void updateClock() {
+#ifdef USE_DISPLAY
   // Pre-compute hand degrees, x & y coords for a fast screen update.
   float sdeg = ss*6;                  // 0-59 -> 0-354
   float mdeg = mm*6+sdeg*0.01666667;  // 0-59 -> 0-360 - includes seconds
@@ -259,6 +265,7 @@ void updateClock() {
   tft.drawLine(osx, osy, 65, 65, TFT_RED);
 
   tft.fillCircle(65, 65, 3, TFT_RED);
+#endif
 }
 
 void initVoltage() {
@@ -332,8 +339,10 @@ void display(bool on) {
 // signal.
 void deepSleep() {
   display(false);
+#ifdef USE_DISPLAY
   tft.writecommand(TFT_DISPOFF);
   tft.writecommand(TFT_SLPIN);
+#endif
   esp_sleep_enable_ext1_wakeup(GPIO_SEL_35, ESP_EXT1_WAKEUP_ALL_LOW);
   esp_deep_sleep_start();
 }
@@ -388,7 +397,6 @@ void handleDisplay(void*) {
 // handleLepton runs at 10Hz.
 void handleLepton(void*) {
   Serial.printf("%u handleLepton()\n", (uint32_t)millis());
-  //*
   if (flir.readNextFrame()) {
     uint32_t frameNumber = flir.getTelemetryFrameCounter();
     if (frameNumber != flirLastFrameNumber) {
@@ -421,18 +429,22 @@ void handleLepton(void*) {
       //}
     }
   }
-  //*/
+  /*
   //String msg(flir.sys_getCameraUptime());
   String msg(flir.sys_getAuxTemperature());
   msg += "`C";
   displayBottom2(msg, TFT_WHITE);
+  */
   Serial.printf("%u handleLepton() end\n", (uint32_t)millis());
 }
 
 // Initialization.
 void setup() {
-  Serial.begin(921600);
+  // The CP2104 works fine at high speed.
+  // Don't forget to update monitor_speed in ../platform.ini.
+  Serial.begin(1843200);
 
+  // Wifi.
   // TODO(maruel): Neither hostname nor events work.
   WiFi.setHostname("ircam-esp32");
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -457,22 +469,20 @@ void setup() {
   fromhex(pass);
   WiFi.begin(WIFI_SSID, (const char *)pass);
 
-  // TODO(maruel): Use DMA for the Lepton, since it sends more data than what
-  // we'll display (3x the actual framerate).
-  //lepton_spi.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
-  //lepton_cci.begin();
-  //
-  // TODO(maruel): Test 1MHz, will need to adjust pull up resistor.
-  Wire.begin(I2C_SDA, I2C_SCL, 400000);
-  // No need to set the speed, every transaction sets the speed to around 20MHz.
-  // Documentation is code:
+  // Camera.
+  // Change to 400000 if not stable..
+  Wire.begin(I2C_SDA, I2C_SCL, 1000000);
+  // An ESP32 specific implementation is used. Documentation is code:
   //   https://github.com/espressif/arduino-esp32/blob/master/libraries/SPI/src/SPI.h
-  SPI.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, IR_SPI_CS);
-  SPI.setHwCs(true);
+  // The lepton code uses its own CS line handling so we must not configure the
+  // SPI one properly (!) with IR_SPI_CS. Instead sacrifice GPIO 32 for this, it's
+  // not currently used. The CS line for the lepton never seems to be raised by
+  // the driver so I think the implementation is incorrect.
+  SPI.begin(IR_SPI_SCLK, IR_SPI_MISO, IR_SPI_MOSI, 32);
   flir.init(LeptonFLiR_ImageStorageMode_80x60_16bpp);
-  //LeptonFLiR_ImageStorageMode_40x30_8bpp);
   flir.sys_setTelemetryEnabled(ENABLED);
 
+  // Buttons.
   button_left.setPressedHandler([](Button2 & b) {
     bottomDisplay = (BOTTOM_DISPLAY)((bottomDisplay+1)%BOTTOM_DISPLAY_END);
   });
@@ -482,7 +492,9 @@ void setup() {
   initVoltage();
 
   // Display and Clock.
+#ifdef USE_DISPLAY
   tft.init();
+#endif
   drawClock();
   displayBottom("Welcome!", TFT_WHITE);
   displayBottom2("FLIR", TFT_WHITE);
